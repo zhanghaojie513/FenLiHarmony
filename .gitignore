@@ -20,3 +20,5 @@
 
 # Mimosa 工具本地缓存
 .mimosa/
+# Cowork 协作工具本地目录
+.next-cowork/
