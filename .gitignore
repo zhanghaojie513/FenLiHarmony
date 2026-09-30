@@ -17,3 +17,6 @@
 # UI 验收截图：本地跑 UI 检查留下的痕迹，不入库
 /ui-verification
 /ui-check-after-launch.png
+
+# Mimosa 工具本地缓存
+.mimosa/
