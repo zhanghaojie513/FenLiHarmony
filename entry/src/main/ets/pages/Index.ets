@@ -21,6 +21,9 @@ struct Index {
   @State currentTab: number = 0;
   private tabsController: TabsController = new TabsController();
   @State amountText: string = '0.00';
+  private pendingAmount: number = 0;
+  private pendingOperator: string = '';
+  private replaceAmount: boolean = false;
   @State selectedCategory: string = '餐饮';
   @State noteText: string = '';
   @State savedMessage: string = '';
@@ -368,18 +371,40 @@ struct Index {
   }
 
   private appendDigit(digit: string): void {
-    if (this.amountText === '0.00') {
+    if (this.replaceAmount || this.amountText === '0.00') {
+      this.amountText = '';
+      this.replaceAmount = false;
+    }
+    if (digit === '.') {
+      if (this.amountText.indexOf('.') >= 0) {
+        return;
+      }
+      this.amountText = this.amountText.length === 0 || this.amountText === '0.00' ? '0.' : this.amountText + '.';
+      return;
+    }
+    if (this.amountText === '0.00' || this.amountText.length === 0) {
       this.amountText = digit;
       return;
     }
-    if (this.amountText.length < 8) {
+    const decimalIndex: number = this.amountText.indexOf('.');
+    if (decimalIndex >= 0 && this.amountText.length - decimalIndex > 2) {
+      return;
+    }
+    if (this.amountText === '0') {
+      this.amountText = digit;
+    } else if (this.amountText.length < 8) {
       this.amountText = this.amountText + digit;
     }
   }
 
   private removeDigit(): void {
+    if (this.replaceAmount) {
+      this.amountText = '';
+      this.replaceAmount = false;
+      return;
+    }
     if (this.amountText.length <= 1) {
-      this.amountText = '0.00';
+      this.amountText = '';
       return;
     }
     this.amountText = this.amountText.substring(0, this.amountText.length - 1);
@@ -390,7 +415,39 @@ struct Index {
   }
 
   private updateAmountText(value: string): void {
-    this.amountText = value.length === 0 ? '0.00' : value;
+    this.amountText = value;
+    this.replaceAmount = false;
+  }
+
+  private resolveAmount(): number {
+    const current: number = Number(this.amountText);
+    if (this.pendingOperator.length === 0 || this.replaceAmount) {
+      return current;
+    }
+    const cents: number = Math.round(current * 100);
+    return (this.pendingOperator === '+' ? this.pendingAmount + cents : this.pendingAmount - cents) / 100;
+  }
+
+  private chooseAmountOperator(operator: string): void {
+    const amount: number = this.resolveAmount();
+    if (!Number.isFinite(amount) || amount < 0 || amount > 99999999) {
+      this.getUIContext().showAlertDialog({
+        title: '金额无效',
+        message: '运算结果须在 0 到 99,999,999 之间。',
+        buttons: [{ value: '知道了', action: () => {} }]
+      });
+      return;
+    }
+    this.pendingAmount = Math.round(amount * 100);
+    this.pendingOperator = operator;
+    this.amountText = amount.toFixed(2);
+    this.replaceAmount = true;
+  }
+
+  private clearAmountOperation(): void {
+    this.pendingAmount = 0;
+    this.pendingOperator = '';
+    this.replaceAmount = false;
   }
 
   private openEntryDatePicker(): void {
@@ -408,6 +465,7 @@ struct Index {
   private showBookSettings(): void {
     this.getUIContext().showActionSheet({
       title: '账本管理',
+      message: '选择账本显示名称',
       sheets: [
         {
           title: '默认账本',
@@ -473,14 +531,15 @@ struct Index {
   private showExportSettings(): void {
     this.getUIContext().showActionSheet({
       title: '数据导出',
+      message: '文件导出功能暂不可用',
       sheets: [
         {
           title: '导出 CSV',
           action: () => {
             this.getUIContext().showAlertDialog({
               title: 'CSV 导出',
-              message: '已整理 ' + this.transactions.length + ' 条记录，CSV 文件已准备完成。',
-              buttons: [{ value: '完成', action: () => { this.savedMessage = 'CSV 数据已准备'; } }]
+               message: 'CSV 文件导出暂不可用，当前未生成文件。',
+               buttons: [{ value: '知道了', action: () => {} }]
             });
           }
         },
@@ -489,8 +548,8 @@ struct Index {
           action: () => {
             this.getUIContext().showAlertDialog({
               title: 'Excel 导出',
-              message: '已整理 ' + this.transactions.length + ' 条记录，Excel 文件已准备完成。',
-              buttons: [{ value: '完成', action: () => { this.savedMessage = 'Excel 数据已准备'; } }]
+               message: 'Excel 文件导出暂不可用，当前未生成文件。',
+               buttons: [{ value: '知道了', action: () => {} }]
             });
           }
         }
@@ -513,7 +572,7 @@ struct Index {
   private showGeneralSettings(): void {
     this.getUIContext().showAlertDialog({
       title: '通用设置',
-      message: '分厘 v1.0.0\n数据保存在本机。恢复演示数据会清除当前新增记录。',
+      message: '分厘 v1.0.0\n当前记录仅保存在本次运行中，重启后会重置。恢复演示数据会清除当前新增记录。',
       buttons: [
         {
           value: '恢复演示数据',
@@ -538,17 +597,41 @@ struct Index {
     });
   }
 
+  private handleProfileSetting(title: string): void {
+    if (title === '账本管理') {
+      this.showBookSettings();
+    } else if (title === '分类管理') {
+      this.showCategorySettings();
+    } else if (title === '预算设置') {
+      this.showBudgetSettings();
+    } else if (title === '记账提醒') {
+      this.showReminderSettings();
+    } else if (title === '数据导出') {
+      this.showExportSettings();
+    } else if (title === '通用设置') {
+      this.showGeneralSettings();
+    } else if (title === '关于分厘') {
+      this.showAbout();
+    }
+  }
+
   private switchTab(tabIndex: number): void {
     this.currentTab = tabIndex;
     this.tabsController.changeIndex(tabIndex);
   }
 
   private saveTransaction(): void {
-    const amount: number = Number.parseFloat(this.amountText);
-    if (Number.isNaN(amount) || amount <= 0) {
+    const amount: number = this.resolveAmount();
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 99999999) {
       this.savedMessage = '请输入有效金额';
+      this.getUIContext().showAlertDialog({
+        title: '金额无效',
+        message: '请输入大于 0 且不超过 99,999,999 的金额。',
+        buttons: [{ value: '知道了', action: () => {} }]
+      });
       return;
     }
+    this.clearAmountOperation();
     const nextNumber: string = this.pad2(this.transactions.length + 1);
     const detail: string = this.noteText.length > 0 ? this.noteText : '手动记账';
     const nextTransaction: FenLiTransaction = {
@@ -848,12 +931,14 @@ struct Index {
       Column() {
         Blank().height(54)
         Row() {
-          Text('取消')
+            Text('取消')
             .fontSize(14)
             .fontColor('#999999')
             .onClick(() => {
               this.amountText = '0.00'
-              this.noteText = ''
+              this.clearAmountOperation();
+              this.noteText = '';
+              this.entryDate = new Date();
             })
           Column({ space: 4 }) {
             Row({ space: 5 }) {
@@ -881,7 +966,22 @@ struct Index {
           this.labelText('AMOUNT')
           Row({ space: 5 }) {
             Text('¥').fontSize(24).fontColor('#999999').fontFamily('monospace')
-            Text(this.amountText).fontSize(64).fontFamily('monospace').fontWeight(FontWeight.Medium)
+            TextInput({ placeholder: '0.00', text: this.amountText })
+              .width(220)
+              .height(76)
+              .fontSize(54)
+              .fontFamily('monospace')
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#111111')
+              .textAlign(TextAlign.Start)
+              .type(InputType.NUMBER_DECIMAL)
+              .maxLength(8)
+              .inputFilter('^[0-9]*[.]?[0-9]{0,2}$')
+              .showUnderline(false)
+              .backgroundColor('#FFFFFF')
+              .onChange((value: string) => {
+                this.updateAmountText(value);
+              })
           }
           Blank().width(64).height(2).backgroundColor('#CCFF00')
         }
@@ -918,11 +1018,14 @@ struct Index {
           Row() {
             Text('日期').fontSize(14).fontColor('#999999')
             Blank().layoutWeight(1)
-             Text(this.shortDateLabel(new Date())).fontSize(14).fontColor('#111111').fontFamily('monospace')
-            Text('›').fontSize(20).fontColor('#999999').margin({ left: 8 })
-          }
-          .width('100%')
-          .padding({ top: 12, bottom: 12 })
+             Text(this.shortDateLabel(this.entryDate)).fontSize(14).fontColor('#111111').fontFamily('monospace')
+             Text('›').fontSize(20).fontColor('#999999').margin({ left: 8 })
+           }
+           .width('100%')
+           .padding({ top: 12, bottom: 12 })
+           .onClick(() => {
+             this.openEntryDatePicker();
+           })
           Divider().color('#E5E5E5')
           Row() {
             Text('备注').fontSize(14).fontColor('#999999')
@@ -1018,6 +1121,8 @@ struct Index {
           this.removeDigit()
         } else if (key === '确定') {
           this.saveTransaction()
+        } else if (key === '+' || key === '−') {
+          this.chooseAmountOperator(key)
         } else if (key !== '+' && key !== '−' && key !== '00') {
           this.appendDigit(key)
         } else if (key === '00') {
@@ -1076,11 +1181,11 @@ struct Index {
         Divider().color('#E5E5E5')
 
         Column() {
-          this.labelText('SETTINGS')
-          this.profileSettingRow($r('app.media.settings_book'), '账本管理', '默认账本')
-          this.profileSettingRow($r('app.media.settings_category'), '分类管理', '8 个分类')
-          this.profileSettingRow($r('app.media.settings_budget'), '预算设置', '¥15,000 / 月')
-          this.profileSettingRow($r('app.media.settings_reminder'), '记账提醒', '每日 22:00')
+           this.labelText('SETTINGS')
+           this.profileSettingRow($r('app.media.settings_book'), '账本管理', this.currentBookLabel)
+           this.profileSettingRow($r('app.media.settings_category'), '分类管理', '8 个分类')
+           this.profileSettingRow($r('app.media.settings_budget'), '预算设置', this.budgetLabel)
+           this.profileSettingRow($r('app.media.settings_reminder'), '记账提醒', this.reminderLabel)
           this.profileSettingRow($r('app.media.settings_export'), '数据导出', 'CSV / Excel')
           this.profileSettingRow($r('app.media.settings_settings'), '通用设置', '')
           this.profileSettingRow($r('app.media.settings_info'), '关于分厘', 'v1.0.0')
@@ -1126,6 +1231,9 @@ struct Index {
       }
       .width('100%')
       .padding({ top: 15, bottom: 15 })
+      .onClick(() => {
+        this.handleProfileSetting(title);
+      })
       Divider().color('#E5E5E5')
     }
     .width('100%')
