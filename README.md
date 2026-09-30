@@ -1,5 +1,9 @@
 # 分厘 FenLi
 
+<p align="center">
+  <img src="docs/logo.png" width="320" alt="分厘 FenLi Logo">
+</p>
+
 极简记账 HarmonyOS 应用 · 每一笔都清楚。
 
 分厘是一款遵循极简设计语言的记账应用：黑白为主、荧光绿（#CCFF00）点缀、等宽字体数字。核心功能围绕"记一笔"展开——金额输入、分类选择、备注与日期，并在每日 / 每周 / 每月三个维度提供支出统计与趋势分析。
@@ -31,6 +35,14 @@ oh-package.json5       # 依赖管理
 ```bash
 hvigorw assembleHap
 ```
+
+## 应用预览
+
+<p align="center">
+  <img src="docs/商店宣传.png" width="300" alt="分厘 应用预览：启动页 / 每日 / 每周 / 每月">
+</p>
+
+> 从上至下：启动页 · 每日页（3秒，记一笔）· 每周页（7天，一个节奏）· 每月页（30天，一本账）
 
 ## 设计稿
 
