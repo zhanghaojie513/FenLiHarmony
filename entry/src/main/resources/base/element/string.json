@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "label"
+    },
+    {
+      "name": "permission_publish_agent_reminder_reason",
+      "value": "用于按账本提醒设置发布每日记账提醒"
     }
   ]
 }

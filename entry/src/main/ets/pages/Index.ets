@@ -1,4 +1,16 @@
+import {
+  createFenLiDemoData,
+  FenLiCategory,
+  FenLiLedger,
+  FenLiStoreData,
+  FenLiTransaction as FenLiStoredTransaction
+} from '../model/FenLiModels';
+import { FenLiStorage } from '../service/FenLiStorage';
+import { FenLiExport } from '../service/FenLiExport';
+import { FenLiReminder, FenLiReminderStatus } from '../service/FenLiReminder';
+
 interface FenLiTransaction {
+  id: string;
   number: string;
   title: string;
   category: string;
@@ -6,6 +18,43 @@ interface FenLiTransaction {
   amount: number;
   time: string;
   date: string;
+}
+
+@CustomDialog
+struct FenLiNameDialog {
+  controller: CustomDialogController;
+  @State inputText: string = '';
+  titleText: string = '';
+  initialText: string = '';
+  onConfirm: (name: string) => void = (_name: string): void => {};
+
+  aboutToAppear(): void {
+    this.inputText = this.initialText;
+  }
+
+  build() {
+    Column({ space: 18 }) {
+      Text(this.titleText).fontSize(20).fontWeight(FontWeight.Bold).alignSelf(ItemAlign.Start)
+      TextInput({ placeholder: '请输入名称', text: this.inputText })
+        .width('100%')
+        .onChange((value: string): void => {
+          this.inputText = value;
+        })
+      Row({ space: 12 }) {
+        Button('取消').layoutWeight(1).onClick(() => this.controller.close())
+        Button('确定').layoutWeight(1).onClick(() => {
+          const name: string = this.inputText.trim();
+          if (name.length > 0) {
+            this.onConfirm(name);
+            this.controller.close();
+          }
+        })
+      }
+    }
+    .padding(24)
+    .width('88%')
+    .backgroundColor('#FFFFFF')
+  }
 }
 
 function fenliDateKey(value: Date): string {
@@ -32,32 +81,206 @@ struct Index {
   @State currentBookLabel: string = '默认账本';
   @State budgetLabel: string = '¥15,000 / 月';
   @State reminderLabel: string = '每日 22:00';
+  @State storeData: FenLiStoreData = createFenLiDemoData();
+  @State dataReady: boolean = false;
+  @State editTransactionId: string = '';
+  private saving: boolean = false;
+  private reminderId: number = -1;
   @State transactions: FenLiTransaction[] = [
-    { number: '01', title: '午餐', category: '餐饮', detail: '公司楼下沙拉轻食', amount: 42.00, time: '12:35', date: fenliDateKey(new Date()) },
-    { number: '02', title: '咖啡', category: '餐饮', detail: 'Manner 冰美式', amount: 15.00, time: '09:20', date: fenliDateKey(new Date()) },
-    { number: '03', title: '地铁', category: '交通', detail: '通勤往返', amount: 8.00, time: '08:15', date: fenliDateKey(new Date()) },
-    { number: '04', title: '书籍', category: '学习', detail: '《设计心理学》', amount: 68.00, time: '14:50', date: fenliDateKey(new Date()) },
-    { number: '05', title: '晚餐', category: '餐饮', detail: '海底捞（与朋友聚餐 AA）', amount: 156.50, time: '19:10', date: fenliDateKey(new Date()) },
-    { number: '06', title: '水果', category: '日用', detail: '百果园 车厘子', amount: 558.00, time: '20:30', date: fenliDateKey(new Date()) }
+    { id: 'legacy-01', number: '01', title: '午餐', category: '餐饮', detail: '公司楼下沙拉轻食', amount: 42.00, time: '12:35', date: fenliDateKey(new Date()) },
+    { id: 'legacy-02', number: '02', title: '咖啡', category: '餐饮', detail: 'Manner 冰美式', amount: 15.00, time: '09:20', date: fenliDateKey(new Date()) },
+    { id: 'legacy-03', number: '03', title: '地铁', category: '交通', detail: '通勤往返', amount: 8.00, time: '08:15', date: fenliDateKey(new Date()) },
+    { id: 'legacy-04', number: '04', title: '书籍', category: '学习', detail: '《设计心理学》', amount: 68.00, time: '14:50', date: fenliDateKey(new Date()) },
+    { id: 'legacy-05', number: '05', title: '晚餐', category: '餐饮', detail: '海底捞（与朋友聚餐 AA）', amount: 156.50, time: '19:10', date: fenliDateKey(new Date()) },
+    { id: 'legacy-06', number: '06', title: '水果', category: '日用', detail: '百果园 车厘子', amount: 558.00, time: '20:30', date: fenliDateKey(new Date()) }
   ];
 
+  aboutToAppear(): void {
+    this.loadStoredData();
+  }
+
+  private async loadStoredData(): Promise<void> {
+    const context: Context = getContext(this);
+    const loaded: FenLiStoreData = await FenLiStorage.load(context);
+    this.storeData = loaded;
+    this.currentBookLabel = this.activeLedgerName(loaded);
+    this.budgetLabel = '¥' + (loaded.budget.monthlyLimitCents / 100).toFixed(0) + ' / 月';
+    this.reminderLabel = loaded.reminder.enabled ? '每日 ' + this.pad2(loaded.reminder.hour) + ':' + this.pad2(loaded.reminder.minute) : '关闭提醒';
+    this.reminderId = loaded.reminder.reminderId;
+    this.transactions = this.legacyTransactions(loaded);
+    this.dataReady = true;
+  }
+
+  private activeLedgerName(data: FenLiStoreData): string {
+    for (const ledger of data.ledgers) {
+      if (ledger.id === data.activeLedgerId) {
+        return ledger.name;
+      }
+    }
+    return data.ledgers.length > 0 ? data.ledgers[0].name : '默认账本';
+  }
+
+  private legacyTransactions(data: FenLiStoreData): FenLiTransaction[] {
+    const result: FenLiTransaction[] = [];
+    let number: number = 1;
+    for (const stored of data.transactions) {
+      if (stored.ledgerId !== data.activeLedgerId) {
+        continue;
+      }
+      let categoryName: string = '其他';
+      for (const category of data.categories) {
+        if (category.id === stored.categoryId) {
+          categoryName = category.name;
+          break;
+        }
+      }
+      result.push({
+        id: stored.id,
+        number: this.pad2(number),
+        title: categoryName,
+        category: categoryName,
+        detail: stored.note,
+        amount: stored.amountCents / 100,
+        time: stored.createdAt.length >= 16 ? stored.createdAt.substring(11, 16) : '00:00',
+        date: stored.occurredOn
+      });
+      number += 1;
+    }
+    return result;
+  }
+
+  private activeCategoryId(): string {
+    for (const category of this.storeData.categories) {
+      if (category.name === this.selectedCategory) {
+        return category.id;
+      }
+    }
+    return this.storeData.categories.length > 0 ? this.storeData.categories[0].id : 'category-other';
+  }
+
+  private hasCategory(name: string): boolean {
+    for (const category of this.storeData.categories) {
+      if (category.name === name) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private async persistStoreData(): Promise<void> {
+    if (this.saving) {
+      throw new Error('保存正在进行');
+    }
+    this.saving = true;
+    const context: Context = getContext(this);
+    try {
+      await FenLiStorage.save(context, this.storeData);
+    } finally {
+      this.saving = false;
+    }
+  }
+
+  private applyReminderSettings(): void {
+    if (!this.storeData.reminder.enabled && this.reminderId >= 0) {
+      FenLiReminder.cancel(this.reminderId).then((result: FenLiReminderStatus): void => {
+        this.savedMessage = result.message;
+        this.reminderId = -1;
+      });
+      return;
+    }
+    if (this.storeData.reminder.enabled && this.reminderId >= 0) {
+      FenLiReminder.cancel(this.reminderId).then((): void => {
+        this.reminderId = -1;
+        this.storeData.reminder.reminderId = -1;
+        this.applyReminderSettings();
+      });
+      return;
+    }
+    FenLiReminder.scheduleDaily(this.storeData.reminder).then((result: FenLiReminderStatus): void => {
+      this.savedMessage = result.message;
+      if (result.reminderId >= 0) {
+        this.reminderId = result.reminderId;
+        this.storeData.reminder.reminderId = result.reminderId;
+        this.persistStoreData().catch(() => {
+          this.savedMessage = '提醒编号保存失败';
+        });
+      }
+    });
+  }
+
+  private selectLedger(ledgerId: string): void {
+    const previousId: string = this.storeData.activeLedgerId;
+    this.storeData.activeLedgerId = ledgerId;
+    this.currentBookLabel = this.activeLedgerName(this.storeData);
+    this.transactions = this.legacyTransactions(this.storeData);
+    this.persistStoreData().catch(() => {
+      this.storeData.activeLedgerId = previousId;
+      this.currentBookLabel = this.activeLedgerName(this.storeData);
+      this.transactions = this.legacyTransactions(this.storeData);
+      this.savedMessage = '账本切换保存失败';
+    });
+  }
+
+  private async deleteTransaction(id: string): Promise<void> {
+    const previous: FenLiStoreData = this.storeData;
+    this.storeData = {
+      schemaVersion: previous.schemaVersion,
+      activeLedgerId: previous.activeLedgerId,
+      ledgers: previous.ledgers,
+      categories: previous.categories,
+      transactions: previous.transactions.filter((item: FenLiStoredTransaction): boolean => item.id !== id),
+      budget: previous.budget,
+      reminder: previous.reminder
+    };
+    try {
+      await this.persistStoreData();
+      this.transactions = this.legacyTransactions(this.storeData);
+      this.savedMessage = '记录已删除';
+    } catch (_error) {
+      this.storeData = previous;
+      this.savedMessage = '删除记录保存失败';
+    }
+  }
+
+  private confirmDeleteTransaction(id: string): void {
+    this.getUIContext().showAlertDialog({
+      title: '删除记录',
+      message: '删除后无法恢复，确定继续吗？',
+      buttons: [
+        { value: '删除', action: () => { this.deleteTransaction(id); } },
+        { value: '取消', action: () => {} }
+      ]
+    });
+  }
+
   private dailyTotal(): number {
-    let sum: number = 0;
+    let sumCents: number = 0;
     const key: string = fenliDateKey(this.selectedDate);
     for (const item of this.transactions) {
       if (item.date === key) {
-        sum += item.amount;
+        sumCents += Math.round(item.amount * 100);
       }
     }
-    return sum;
+    return sumCents / 100;
   }
 
   private dailyTransactions(): FenLiTransaction[] {
     const result: FenLiTransaction[] = [];
     const key: string = fenliDateKey(this.selectedDate);
+    let number: number = 1;
     for (const item of this.transactions) {
       if (item.date === key) {
-        result.push(item);
+        result.push({
+          id: item.id,
+          number: this.pad2(number),
+          title: item.title,
+          category: item.category,
+          detail: item.detail,
+          amount: item.amount,
+          time: item.time,
+          date: item.date
+        });
+        number += 1;
       }
     }
     return result;
@@ -94,11 +317,11 @@ struct Index {
   }
 
   private totalFor(items: FenLiTransaction[]): number {
-    let sum: number = 0;
+    let sumCents: number = 0;
     for (const item of items) {
-      sum += item.amount;
+      sumCents += Math.round(item.amount * 100);
     }
-    return sum;
+    return sumCents / 100;
   }
 
   private weeklyTransactions(): FenLiTransaction[] {
@@ -117,6 +340,20 @@ struct Index {
 
   private monthlyTotal(): number {
     return this.totalFor(this.monthTransactions());
+  }
+
+  private recordedDays(): number {
+    const days: string[] = [];
+    for (const item of this.transactions) {
+      if (days.indexOf(item.date) < 0) {
+        days.push(item.date);
+      }
+    }
+    return days.length;
+  }
+
+  private monthlyCount(): number {
+    return this.monthTransactions().length;
   }
 
   private shiftDays(amount: number): Date {
@@ -266,15 +503,16 @@ struct Index {
   }
 
   private weekNumber(): number {
-    const yearStart: Date = new Date(this.selectedDate.getFullYear(), 0, 1);
-    const firstMondayDistance: number = yearStart.getDay() === 0 ? 6 : yearStart.getDay() - 1;
-    const firstMonday: Date = new Date(this.selectedDate.getFullYear(), 0, 1 - firstMondayDistance);
-    const difference: number = this.weekStart(this.selectedDate).getTime() - firstMonday.getTime();
-    return Math.floor(difference / 604800000) + 1;
+    const thursday: Date = new Date(this.weekStart(this.selectedDate).getTime());
+    thursday.setDate(thursday.getDate() + 3);
+    const firstThursday: Date = new Date(thursday.getFullYear(), 0, 4);
+    return Math.floor((this.weekStart(this.selectedDate).getTime() - this.weekStart(firstThursday).getTime()) / 604800000) + 1;
   }
 
   private weekLabel(): string {
-    return '' + this.selectedDate.getFullYear() + ' · 第 ' + this.weekNumber() + ' 周';
+    const thursday: Date = new Date(this.weekStart(this.selectedDate).getTime());
+    thursday.setDate(thursday.getDate() + 3);
+    return '' + thursday.getFullYear() + ' · 第 ' + this.weekNumber() + ' 周（ISO 周一至周日）';
   }
 
   private dateRangeLabel(start: Date, end: Date): string {
@@ -294,7 +532,42 @@ struct Index {
   }
 
   private monthlyAverage(): string {
-    return (this.monthlyTotal() / this.selectedDate.getDate()).toFixed(2);
+    const monthDays: number = this.daysInMonth(this.selectedDate.getFullYear(), this.selectedDate.getMonth());
+    return (this.monthlyTotal() / monthDays).toFixed(2);
+  }
+
+  private currentMonthDate(): Date {
+    const now: Date = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  }
+
+  private currentMonthTransactions(): FenLiTransaction[] {
+    const now: Date = this.currentMonthDate();
+    return this.periodTransactions(new Date(now.getFullYear(), now.getMonth(), 1), new Date(now.getFullYear(), now.getMonth(), this.daysInMonth(now.getFullYear(), now.getMonth())));
+  }
+
+  private currentMonthTotal(): number {
+    return this.totalFor(this.currentMonthTransactions());
+  }
+
+  private currentMonthAverage(): string {
+    const now: Date = this.currentMonthDate();
+    return (this.currentMonthTotal() / this.daysInMonth(now.getFullYear(), now.getMonth())).toFixed(2);
+  }
+
+  private budgetUsedCents(): number {
+    let cents: number = 0;
+    for (const item of this.currentMonthTransactions()) { cents += Math.round(item.amount * 100); }
+    return cents;
+  }
+
+  private budgetRemainingCents(): number {
+    return this.storeData.budget.monthlyLimitCents - this.budgetUsedCents();
+  }
+
+  private budgetStatusLabel(): string {
+    const remaining: number = this.budgetRemainingCents();
+    return remaining < 0 ? '已超支 ¥' + (Math.abs(remaining) / 100).toFixed(2) : '剩余 ¥' + (remaining / 100).toFixed(2);
   }
 
   private comparisonText(current: number, previous: number): string {
@@ -343,13 +616,13 @@ struct Index {
   }
 
   private categoryAmount(category: string): number {
-    let sum: number = 0;
+    let sumCents: number = 0;
     for (const item of this.monthTransactions()) {
       if (item.category === category) {
-        sum += item.amount;
+        sumCents += Math.round(item.amount * 100);
       }
     }
-    return sum;
+    return sumCents / 100;
   }
 
   private categoryRatio(category: string): number {
@@ -414,6 +687,52 @@ struct Index {
     this.selectedCategory = category;
   }
 
+  private openTransactionDetail(item: FenLiTransaction): void {
+    this.getUIContext().showAlertDialog({
+      title: item.title + ' · ¥' + item.amount.toFixed(2),
+      message: item.detail + '\n' + item.date + ' ' + item.time,
+      buttons: [
+        { value: '编辑', action: () => { this.editTransaction(item.id); } },
+        { value: '删除', action: () => { this.confirmDeleteTransaction(item.id); } },
+        { value: '关闭', action: () => {} }
+      ]
+    });
+  }
+
+  private editTransaction(id: string): void {
+    for (const item of this.storeData.transactions) {
+      if (item.id === id) {
+        this.editTransactionId = item.id;
+        this.amountText = (item.amountCents / 100).toFixed(2);
+        this.selectedCategory = this.categoryName(item.categoryId);
+        this.noteText = item.note;
+        this.entryDate = new Date(item.occurredOn + 'T00:00:00');
+        this.clearAmountOperation();
+        this.switchTab(2);
+        return;
+      }
+    }
+  }
+
+  private categoryName(id: string): string {
+    for (const category of this.storeData.categories) {
+      if (category.id === id) {
+        return category.name;
+      }
+    }
+    return this.storeData.categories.length > 0 ? this.storeData.categories[0].name : '其他';
+  }
+
+  private cancelEntry(): void {
+    this.amountText = '0.00';
+    this.clearAmountOperation();
+    this.noteText = '';
+    this.entryDate = new Date();
+    this.editTransactionId = '';
+    this.selectedCategory = this.storeData.categories.length > 0 ? this.storeData.categories[0].name : '其他';
+    this.switchTab(0);
+  }
+
   private updateAmountText(value: string): void {
     this.amountText = value;
     this.replaceAmount = false;
@@ -463,40 +782,225 @@ struct Index {
   }
 
   private showBookSettings(): void {
+    const sheets: SheetInfo[] = [];
+    for (const ledger of this.storeData.ledgers) {
+      sheets.push({ title: (ledger.id === this.storeData.activeLedgerId ? '✓ ' : '') + ledger.name, action: () => { this.selectLedger(ledger.id); } });
+    }
+    sheets.push({ title: '新增账本', action: () => { this.openNameDialog('新增账本', '', (name: string): void => { this.addLedger(name); }); } });
+    sheets.push({ title: '重命名当前账本', action: () => { this.openNameDialog('重命名账本', this.currentBookLabel, (name: string): void => { this.renameLedger(name); }); } });
+    sheets.push({ title: '删除当前账本', action: () => { this.confirmDeleteLedger(); } });
     this.getUIContext().showActionSheet({
       title: '账本管理',
-      message: '选择账本显示名称',
-      sheets: [
-        {
-          title: '默认账本',
-          action: () => {
-            this.currentBookLabel = '默认账本';
-            this.savedMessage = '已切换到默认账本';
-          }
-        },
-        {
-          title: '个人账本',
-          action: () => {
-            this.currentBookLabel = '个人账本';
-            this.savedMessage = '已切换到个人账本';
-          }
-        }
+      message: '选择账本或管理当前账本',
+      sheets
+    });
+  }
+
+  private openNameDialog(title: string, initial: string, callback: (name: string) => void): void {
+    const controller: CustomDialogController = new CustomDialogController({
+      builder: FenLiNameDialog({ titleText: title, initialText: initial, onConfirm: callback }),
+      alignment: DialogAlignment.Center,
+      autoCancel: true,
+      customStyle: false
+    });
+    controller.open();
+  }
+
+  private addLedger(name: string): void {
+    if (this.ledgerNameExists(name)) {
+      this.savedMessage = '账本名称已存在';
+      return;
+    }
+    const now: Date = new Date();
+    const ledger: FenLiLedger = { id: 'ledger-' + now.getTime(), name, currencyCode: 'CNY', createdAt: fenliDateKey(now) };
+    const previous: FenLiStoreData = this.storeData;
+    this.storeData.ledgers = previous.ledgers.concat([ledger]);
+    this.persistStoreData().then(() => { this.savedMessage = '已新增账本：' + name; }).catch(() => { this.storeData.ledgers = previous.ledgers; this.savedMessage = '账本保存失败'; });
+  }
+
+  private ledgerNameExists(name: string): boolean {
+    for (const ledger of this.storeData.ledgers) {
+      if (ledger.name === name) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private renameLedger(name: string): void {
+    if (this.ledgerNameExists(name)) {
+      this.savedMessage = '账本名称已存在';
+      return;
+    }
+    const previousName: string = this.currentBookLabel;
+    for (const ledger of this.storeData.ledgers) {
+      if (ledger.id === this.storeData.activeLedgerId) {
+        ledger.name = name;
+      }
+    }
+    this.currentBookLabel = name;
+    this.persistStoreData().then(() => { this.savedMessage = '账本已重命名'; }).catch(() => {
+      for (const ledger of this.storeData.ledgers) { if (ledger.id === this.storeData.activeLedgerId) { ledger.name = previousName; } }
+      this.currentBookLabel = previousName;
+      this.savedMessage = '账本重命名保存失败';
+    });
+  }
+
+  private confirmDeleteLedger(): void {
+    if (this.storeData.ledgers.length <= 1) {
+      this.savedMessage = '至少保留一个账本';
+      return;
+    }
+    this.getUIContext().showAlertDialog({
+      title: '删除账本',
+      message: '账本中的记录将迁移到另一个账本，确定删除吗？',
+      buttons: [{ value: '删除并迁移', action: () => { this.deleteLedger(); } }, { value: '取消', action: () => {} }]
+    });
+  }
+
+  private deleteLedger(): void {
+    let targetId: string = '';
+    for (const ledger of this.storeData.ledgers) {
+      if (ledger.id !== this.storeData.activeLedgerId) {
+        targetId = ledger.id;
+        break;
+      }
+    }
+    const previous: FenLiStoreData = this.storeData;
+    const movedTransactions: FenLiStoredTransaction[] = previous.transactions.map((item: FenLiStoredTransaction): FenLiStoredTransaction => {
+      if (item.ledgerId !== previous.activeLedgerId) {
+        return item;
+      }
+      return { id: item.id, ledgerId: targetId, categoryId: item.categoryId, amountCents: item.amountCents, note: item.note, occurredOn: item.occurredOn, createdAt: item.createdAt };
+    });
+    this.storeData = {
+      schemaVersion: previous.schemaVersion,
+      activeLedgerId: targetId,
+      ledgers: previous.ledgers.filter((ledger: FenLiLedger): boolean => ledger.id !== previous.activeLedgerId),
+      categories: previous.categories,
+      transactions: movedTransactions,
+      budget: previous.budget,
+      reminder: previous.reminder
+    };
+    this.currentBookLabel = this.activeLedgerName(this.storeData);
+    this.persistStoreData().then(() => { this.transactions = this.legacyTransactions(this.storeData); this.savedMessage = '账本已删除，记录已迁移'; }).catch(() => { this.storeData = previous; this.currentBookLabel = this.activeLedgerName(previous); this.savedMessage = '账本删除保存失败'; });
+  }
+
+  private showCategorySettings(): void {
+    const sheets: SheetInfo[] = [];
+    for (const category of this.storeData.categories) {
+      sheets.push({ title: category.name, action: () => { this.openCategoryActions(category); } });
+    }
+    sheets.push({ title: '新增分类', action: () => { this.openNameDialog('新增分类', '', (name: string): void => { this.addCategory(name); }); } });
+    this.getUIContext().showActionSheet({
+      title: '分类管理',
+      message: '选择分类后重命名或删除',
+      sheets
+    });
+  }
+
+  private openCategoryActions(category: FenLiCategory): void {
+    this.getUIContext().showActionSheet({ title: category.name, message: '管理分类', sheets: [
+      { title: '重命名', action: () => { this.openNameDialog('重命名分类', category.name, (name: string): void => { this.renameCategory(category.id, name); }); } },
+      { title: '删除', action: () => { this.confirmDeleteCategory(category.name); } }
+    ] });
+  }
+
+  private addCategory(name: string): void {
+    if (this.hasCategory(name)) { this.savedMessage = '分类名称已存在'; return; }
+    const category: FenLiCategory = { id: 'category-' + new Date().getTime(), name, iconName: 'other', colorHex: '#888888' };
+    const previous: FenLiCategory[] = this.storeData.categories;
+    this.storeData.categories = previous.concat([category]);
+    this.persistStoreData().then(() => { this.savedMessage = '已新增分类：' + name; }).catch(() => { this.storeData.categories = previous; this.savedMessage = '分类保存失败'; });
+  }
+
+  private renameCategory(id: string, name: string): void {
+    for (const category of this.storeData.categories) {
+      if (category.name === name && category.id !== id) { this.savedMessage = '分类名称已存在'; return; }
+    }
+    let oldName: string = '';
+    for (const category of this.storeData.categories) { if (category.id === id) { oldName = category.name; category.name = name; } }
+    if (this.selectedCategory === oldName) { this.selectedCategory = name; }
+    this.persistStoreData().then(() => { this.savedMessage = '分类已重命名'; }).catch(() => {
+      for (const category of this.storeData.categories) { if (category.id === id) { category.name = oldName; } }
+      if (this.selectedCategory === name) { this.selectedCategory = oldName; }
+      this.savedMessage = '分类重命名保存失败';
+    });
+  }
+
+  private confirmDeleteCategory(name: string): void {
+    this.getUIContext().showAlertDialog({
+      title: '删除分类',
+      message: '删除“' + name + '”后，已有记录会转入其他分类。',
+      buttons: [
+        { value: '删除', action: () => { this.deleteCategory(name); } },
+        { value: '取消', action: () => {} }
       ]
     });
   }
 
-  private showCategorySettings(): void {
-    this.getUIContext().showAlertDialog({
-      title: '分类管理',
-      message: '当前分类\n餐饮 · 交通 · 购物 · 娱乐\n日用 · 学习 · 医疗 · 其他',
-      buttons: [
-        {
-          value: '知道了',
-          action: () => {
-            this.savedMessage = '分类共 8 个';
-          }
-        }
-      ]
+  private deleteCategory(name: string): void {
+    const previousSelectedCategory: string = this.selectedCategory;
+    let categoryId: string = '';
+    for (const category of this.storeData.categories) {
+      if (category.name === name) {
+        categoryId = category.id;
+      }
+    }
+    let otherId: string = '';
+    for (const category of this.storeData.categories) {
+      if (category.name === '其他') {
+        otherId = category.id;
+      }
+    }
+    if (categoryId.length === 0 || otherId.length === 0 || categoryId === otherId) {
+      this.savedMessage = '其他分类不能删除';
+      return;
+    }
+    const nextCategories: FenLiCategory[] = [];
+    for (const category of this.storeData.categories) {
+      if (category.id !== categoryId) {
+        nextCategories.push(category);
+      }
+    }
+    const nextTransactions: FenLiStoredTransaction[] = [];
+    for (const item of this.storeData.transactions) {
+      if (item.categoryId === categoryId) {
+        const moved: FenLiStoredTransaction = {
+          id: item.id,
+          ledgerId: item.ledgerId,
+          categoryId: otherId,
+          amountCents: item.amountCents,
+          note: item.note,
+          occurredOn: item.occurredOn,
+          createdAt: item.createdAt
+        };
+        nextTransactions.push(moved);
+      } else {
+        nextTransactions.push(item);
+      }
+    }
+    const previous: FenLiStoreData = this.storeData;
+    this.storeData = {
+      schemaVersion: previous.schemaVersion,
+      activeLedgerId: previous.activeLedgerId,
+      ledgers: previous.ledgers,
+      categories: nextCategories,
+      transactions: nextTransactions,
+      budget: previous.budget,
+      reminder: previous.reminder
+    };
+    if (this.selectedCategory === name) {
+      this.selectedCategory = '其他';
+    }
+    this.transactions = this.legacyTransactions(this.storeData);
+    this.persistStoreData().then(() => {
+      this.savedMessage = '已删除分类：' + name;
+    }).catch(() => {
+      this.storeData = previous;
+      this.selectedCategory = previousSelectedCategory;
+      this.transactions = this.legacyTransactions(previous);
+      this.savedMessage = '分类删除保存失败';
     });
   }
 
@@ -511,7 +1015,16 @@ struct Index {
       selected: options.indexOf(this.budgetLabel),
       canLoop: false,
       onAccept: (value: TextPickerResult) => {
+        const previousLabel: string = this.budgetLabel;
+        const previousLimit: number = this.storeData.budget.monthlyLimitCents;
         this.budgetLabel = options[this.pickerIndex(value)] ?? this.budgetLabel;
+        const numericLabel: string = this.budgetLabel.replace('¥', '').replace(' / 月', '').replace(',', '');
+        this.storeData.budget.monthlyLimitCents = Math.round(Number(numericLabel) * 100);
+        this.persistStoreData().then(() => { this.savedMessage = '预算已更新'; }).catch(() => {
+          this.budgetLabel = previousLabel;
+          this.storeData.budget.monthlyLimitCents = previousLimit;
+          this.savedMessage = '预算保存失败';
+        });
       }
     });
   }
@@ -524,6 +1037,19 @@ struct Index {
       canLoop: false,
       onAccept: (value: TextPickerResult) => {
         this.reminderLabel = options[this.pickerIndex(value)] ?? this.reminderLabel;
+        if (this.reminderLabel === '关闭提醒') {
+          this.storeData.reminder.enabled = false;
+          this.storeData.reminder.reminderId = -1;
+        } else {
+          const time: string[] = this.reminderLabel.replace('每日 ', '').split(':');
+          this.storeData.reminder.enabled = true;
+          this.storeData.reminder.hour = Number(time[0]);
+          this.storeData.reminder.minute = Number(time[1]);
+        }
+        this.persistStoreData().catch(() => {
+          this.savedMessage = '提醒设置保存失败';
+        });
+        this.applyReminderSettings();
       }
     });
   }
@@ -531,53 +1057,76 @@ struct Index {
   private showExportSettings(): void {
     this.getUIContext().showActionSheet({
       title: '数据导出',
-      message: '文件导出功能暂不可用',
+      message: '导出为 CSV，Excel 可直接打开',
       sheets: [
         {
           title: '导出 CSV',
           action: () => {
-            this.getUIContext().showAlertDialog({
-              title: 'CSV 导出',
-               message: 'CSV 文件导出暂不可用，当前未生成文件。',
-               buttons: [{ value: '知道了', action: () => {} }]
-            });
+            this.writeCsvExport();
           }
         },
         {
           title: '导出 Excel',
           action: () => {
-            this.getUIContext().showAlertDialog({
-              title: 'Excel 导出',
-               message: 'Excel 文件导出暂不可用，当前未生成文件。',
-               buttons: [{ value: '知道了', action: () => {} }]
-            });
+            this.writeCsvExport();
           }
         }
       ]
     });
   }
 
+  private writeCsvExport(): void {
+    const context: Context = getContext(this);
+    const path: string = context.getApplicationContext().filesDir + '/fenli-' + fenliDateKey(new Date()) + '.csv';
+    FenLiExport.writeCsv(path, this.storeData).then(() => {
+      this.savedMessage = 'CSV 文件已生成';
+      this.getUIContext().showAlertDialog({
+        title: '导出完成',
+        message: '已生成兼容 Excel 的 CSV 文件：\n' + path,
+        buttons: [{ value: '知道了', action: () => {} }]
+      });
+    }).catch(() => {
+      this.savedMessage = 'CSV 导出失败';
+      this.getUIContext().showAlertDialog({
+        title: '导出失败',
+        message: '无法生成 CSV 文件，请稍后重试。',
+        buttons: [{ value: '知道了', action: () => {} }]
+      });
+    });
+  }
+
   private resetDemoData(): void {
-    this.transactions = [
-      { number: '01', title: '午餐', category: '餐饮', detail: '公司楼下沙拉轻食', amount: 42.00, time: '12:35', date: fenliDateKey(new Date()) },
-      { number: '02', title: '咖啡', category: '餐饮', detail: 'Manner 冰美式', amount: 15.00, time: '09:20', date: fenliDateKey(new Date()) },
-      { number: '03', title: '地铁', category: '交通', detail: '通勤往返', amount: 8.00, time: '08:15', date: fenliDateKey(new Date()) },
-      { number: '04', title: '书籍', category: '学习', detail: '《设计心理学》', amount: 68.00, time: '14:50', date: fenliDateKey(new Date()) },
-      { number: '05', title: '晚餐', category: '餐饮', detail: '海底捞（与朋友聚餐 AA）', amount: 156.50, time: '19:10', date: fenliDateKey(new Date()) },
-      { number: '06', title: '水果', category: '日用', detail: '百果园 车厘子', amount: 558.00, time: '20:30', date: fenliDateKey(new Date()) }
-    ];
-    this.savedMessage = '已恢复演示数据';
+    const previous: FenLiStoreData = this.storeData;
+    this.storeData = createFenLiDemoData();
+    this.currentBookLabel = this.activeLedgerName(this.storeData);
+    this.budgetLabel = '¥' + (this.storeData.budget.monthlyLimitCents / 100).toFixed(0) + ' / 月';
+    this.reminderLabel = '每日 ' + this.pad2(this.storeData.reminder.hour) + ':' + this.pad2(this.storeData.reminder.minute);
+    this.transactions = this.legacyTransactions(this.storeData);
+    this.persistStoreData().then(() => {
+      this.savedMessage = '已恢复演示数据';
+    }).catch(() => {
+      this.storeData = previous;
+      this.currentBookLabel = this.activeLedgerName(previous);
+      this.budgetLabel = '¥' + (previous.budget.monthlyLimitCents / 100).toFixed(0) + ' / 月';
+      this.reminderLabel = previous.reminder.enabled ? '每日 ' + this.pad2(previous.reminder.hour) + ':' + this.pad2(previous.reminder.minute) : '关闭提醒';
+      this.transactions = this.legacyTransactions(previous);
+      this.savedMessage = '演示数据保存失败';
+    });
   }
 
   private showGeneralSettings(): void {
     this.getUIContext().showAlertDialog({
       title: '通用设置',
-      message: '分厘 v1.0.0\n当前记录仅保存在本次运行中，重启后会重置。恢复演示数据会清除当前新增记录。',
+      message: '分厘 v1.0.0\n记录、账本和设置保存在本机。恢复演示数据会清除当前新增记录。',
       buttons: [
         {
           value: '恢复演示数据',
           action: () => {
-            this.resetDemoData();
+            this.getUIContext().showAlertDialog({
+              title: '再次确认',
+              message: '恢复演示数据会覆盖当前账本、分类和流水，确定继续吗？',
+              buttons: [{ value: '确定恢复', action: () => { this.resetDemoData(); } }, { value: '取消', action: () => {} }]
+            });
           }
         },
         {
@@ -594,6 +1143,25 @@ struct Index {
       title: '关于分厘',
       message: '分厘\n一款专注日常记录的轻量记账工具\n版本 v1.0.0',
       buttons: [{ value: '知道了', action: () => { } }]
+    });
+  }
+
+  private showWeeklyAnalysis(): void {
+    let highestAmount: number = 0;
+    let highestDay: string = '暂无';
+    for (let index: number = 0; index < 7; index++) {
+      const amount: number = this.weekdayAmount(index);
+      if (amount > highestAmount) {
+        highestAmount = amount;
+        const day: Date = this.weekStart(this.selectedDate);
+        day.setDate(day.getDate() + index);
+        highestDay = (day.getMonth() + 1) + '月' + day.getDate() + '日';
+      }
+    }
+    this.getUIContext().showAlertDialog({
+      title: '本周分析',
+      message: '最高支出日：' + highestDay + '\n最高支出：¥' + highestAmount.toFixed(2) + '\n本周总额：¥' + this.weeklyTotal().toFixed(2),
+      buttons: [{ value: '知道了', action: () => {} }]
     });
   }
 
@@ -620,7 +1188,7 @@ struct Index {
     this.tabsController.changeIndex(tabIndex);
   }
 
-  private saveTransaction(): void {
+  private async saveTransaction(): Promise<void> {
     const amount: number = this.resolveAmount();
     if (!Number.isFinite(amount) || amount <= 0 || amount > 99999999) {
       this.savedMessage = '请输入有效金额';
@@ -631,24 +1199,63 @@ struct Index {
       });
       return;
     }
-    this.clearAmountOperation();
-    const nextNumber: string = this.pad2(this.transactions.length + 1);
     const detail: string = this.noteText.length > 0 ? this.noteText : '手动记账';
-    const nextTransaction: FenLiTransaction = {
-      number: nextNumber,
-      title: this.selectedCategory,
-      category: this.selectedCategory,
-      detail: detail,
-      amount: amount,
-      time: this.currentTime(),
-      date: fenliDateKey(this.entryDate)
+    const amountCents: number = Math.round(amount * 100);
+    const previous: FenLiStoreData = this.storeData;
+    let nextTransactions: FenLiStoredTransaction[] = previous.transactions;
+    if (this.editTransactionId.length > 0) {
+      nextTransactions = previous.transactions.map((item: FenLiStoredTransaction): FenLiStoredTransaction => {
+        if (item.id !== this.editTransactionId) {
+          return item;
+        }
+        return {
+          id: item.id,
+          ledgerId: item.ledgerId,
+          categoryId: this.activeCategoryId(),
+          amountCents,
+          note: detail,
+          occurredOn: fenliDateKey(this.entryDate),
+          createdAt: item.createdAt
+        };
+      });
+    } else {
+      const now: Date = new Date();
+      const stored: FenLiStoredTransaction = {
+        id: 'transaction-' + now.getTime() + '-' + previous.transactions.length,
+        ledgerId: previous.activeLedgerId,
+        categoryId: this.activeCategoryId(),
+        amountCents,
+        note: detail,
+        occurredOn: fenliDateKey(this.entryDate),
+        createdAt: fenliDateKey(now) + 'T' + this.currentTime() + ':00'
+      };
+      nextTransactions = previous.transactions.concat([stored]);
+    }
+    this.storeData = {
+      schemaVersion: previous.schemaVersion,
+      activeLedgerId: previous.activeLedgerId,
+      ledgers: previous.ledgers,
+      categories: previous.categories,
+      transactions: nextTransactions,
+      budget: previous.budget,
+      reminder: previous.reminder
     };
-    this.transactions = this.transactions.concat([nextTransaction]);
+    try {
+      await this.persistStoreData();
+    } catch (_error) {
+      this.storeData = previous;
+      this.savedMessage = '记录保存失败，请重试';
+      return;
+    }
+    this.transactions = this.legacyTransactions(this.storeData);
+    this.clearAmountOperation();
     this.selectedDate = new Date(this.entryDate.getFullYear(), this.entryDate.getMonth(), this.entryDate.getDate());
-    this.savedMessage = '记录成功 · ' + this.selectedCategory;
+    this.savedMessage = (this.editTransactionId.length > 0 ? '记录已更新 · ' : '记录成功 · ') + this.selectedCategory;
     this.amountText = '0.00';
     this.noteText = '';
     this.entryDate = new Date();
+    this.editTransactionId = '';
+    this.selectedCategory = this.storeData.categories.length > 0 ? this.storeData.categories[0].name : '其他';
     this.switchTab(0);
   }
 
@@ -718,8 +1325,8 @@ struct Index {
         .width('100%')
         .margin({ top: 22, bottom: 2 })
 
-         ForEach(this.dailyTransactions(), (item: FenLiTransaction) => {
-           this.transactionRow(item.number, item.title, item.category, item.detail, item.amount, item.time)
+          ForEach(this.dailyTransactions(), (item: FenLiTransaction) => {
+            this.transactionRow(item.id, item.number, item.title, item.category, item.detail, item.amount, item.time)
          }, (item: FenLiTransaction) => item.number)
       }
       .alignItems(HorizontalAlign.Start)
@@ -729,7 +1336,7 @@ struct Index {
   }
 
   @Builder
-  private transactionRow(number: string, title: string, category: string, detail: string, amount: number, time: string): void {
+  private transactionRow(id: string, number: string, title: string, category: string, detail: string, amount: number, time: string): void {
     Column() {
       Row() {
         Column() {
@@ -750,6 +1357,9 @@ struct Index {
       }
       .width('100%')
       .padding({ top: 14, bottom: 14 })
+      .onClick(() => {
+        this.openTransactionDetail({ id, number, title, category, detail, amount, time, date: fenliDateKey(this.selectedDate) });
+      })
       Divider().color('#E5E5E5')
     }
     .width('100%')
@@ -796,14 +1406,17 @@ struct Index {
              .fontColor('#111111')
              .backgroundColor('#FFFFFF')
              .borderWidth(1)
-             .borderColor('#111111')
-             .borderRadius(0)
+            .borderColor('#111111')
+            .borderRadius(0)
+              .onClick(() => {
+                this.showWeeklyAnalysis();
+              })
         }
         .width('100%')
         .margin({ top: 24, bottom: 18 })
           this.comparisonRow('对比上周', this.comparisonText(this.weeklyTotal(), this.previousWeekTotal()), '#111111')
           this.comparisonRow('对比两周前', this.comparisonText(this.weeklyTotal(), this.twoWeeksAgoTotal()), '#888888')
-          this.comparisonRow('对比上月同周', this.comparisonText(this.weeklyTotal(), this.previousMonthWeekTotal()), '#888888')
+           this.comparisonRow('对比上月同周（同日所在 ISO 周）', this.comparisonText(this.weeklyTotal(), this.previousMonthWeekTotal()), '#888888')
         Divider().color('#E5E5E5').margin({ top: 18 })
         Row() {
            this.labelText('7-DAY TREND')
@@ -877,8 +1490,9 @@ struct Index {
         .margin({ top: 16 })
          Column() {
            this.labelText('MONTHLY TOTAL')
-           Text('¥ ' + this.monthlyTotal().toFixed(2)).fontSize(52).fontFamily('monospace').fontWeight(FontWeight.Medium).margin({ top: 10, bottom: 8 })
-           Text('已过 ' + this.selectedDate.getDate() + ' 天  ·  ' + this.monthTransactions().length + ' 笔支出  ·  日均 ¥' + this.monthlyAverage()).fontSize(10).fontColor('#999999').fontFamily('monospace')
+            Text('¥ ' + this.monthlyTotal().toFixed(2)).fontSize(52).fontFamily('monospace').fontWeight(FontWeight.Medium).margin({ top: 10, bottom: 8 })
+             Text(this.monthTransactions().length + ' 笔支出  ·  日均 ¥' + this.monthlyAverage()).fontSize(10).fontColor('#999999').fontFamily('monospace')
+             Text('本月预算 ¥' + (this.storeData.budget.monthlyLimitCents / 100).toFixed(2) + '  ·  已用 ¥' + (this.budgetUsedCents() / 100).toFixed(2) + '  ·  ' + this.budgetStatusLabel()).fontSize(11).fontColor(this.budgetRemainingCents() < 0 ? '#C85D6D' : '#7FA800').margin({ top: 10 })
         }
         .alignItems(HorizontalAlign.Start)
         .width('100%')
@@ -891,13 +1505,9 @@ struct Index {
         }
         .width('100%')
         .margin({ top: 24, bottom: 15 })
-         this.categoryRow('餐饮', this.categoryAmount('餐饮').toFixed(2), this.categoryRatioLabel('餐饮'), this.categoryRatio('餐饮'), this.categoryAmount('餐饮') > 0)
-         this.categoryRow('购物', this.categoryAmount('购物').toFixed(2), this.categoryRatioLabel('购物'), this.categoryRatio('购物'), this.categoryAmount('购物') > 0)
-         this.categoryRow('交通', this.categoryAmount('交通').toFixed(2), this.categoryRatioLabel('交通'), this.categoryRatio('交通'), this.categoryAmount('交通') > 0)
-         this.categoryRow('娱乐', this.categoryAmount('娱乐').toFixed(2), this.categoryRatioLabel('娱乐'), this.categoryRatio('娱乐'), this.categoryAmount('娱乐') > 0)
-         this.categoryRow('学习', this.categoryAmount('学习').toFixed(2), this.categoryRatioLabel('学习'), this.categoryRatio('学习'), this.categoryAmount('学习') > 0)
-         this.categoryRow('日用', this.categoryAmount('日用').toFixed(2), this.categoryRatioLabel('日用'), this.categoryRatio('日用'), this.categoryAmount('日用') > 0)
-         this.categoryRow('其他', this.categoryAmount('其他').toFixed(2), this.categoryRatioLabel('其他'), this.categoryRatio('其他'), this.categoryAmount('其他') > 0)
+          ForEach(this.storeData.categories, (category: FenLiCategory) => {
+            this.categoryRow(category.name, this.categoryAmount(category.name).toFixed(2), this.categoryRatioLabel(category.name), this.categoryRatio(category.name), this.categoryAmount(category.name) > 0)
+          }, (category: FenLiCategory) => category.id)
       }
       .alignItems(HorizontalAlign.Start)
         .padding({ left: 32, right: 32, top: 8, bottom: 24 })
@@ -935,10 +1545,7 @@ struct Index {
             .fontSize(14)
             .fontColor('#999999')
             .onClick(() => {
-              this.amountText = '0.00'
-              this.clearAmountOperation();
-              this.noteText = '';
-              this.entryDate = new Date();
+              this.cancelEntry();
             })
           Column({ space: 4 }) {
             Row({ space: 5 }) {
@@ -993,21 +1600,13 @@ struct Index {
 
         Column() {
           this.labelText('CATEGORY')
-          Row({ space: 8 }) {
-            this.categoryChip('餐饮')
-            this.categoryChip('交通')
-            this.categoryChip('购物')
-            this.categoryChip('娱乐')
-          }
-          .width('100%')
-          .margin({ top: 16, bottom: 12 })
-          Row({ space: 8 }) {
-            this.categoryChip('日用')
-            this.categoryChip('学习')
-            this.categoryChip('医疗')
-            this.categoryChip('其他')
-          }
-          .width('100%')
+           Flex({ wrap: FlexWrap.Wrap }) {
+             ForEach(this.storeData.categories, (category: FenLiCategory) => {
+               this.categoryChip(category.name)
+             }, (category: FenLiCategory) => category.id)
+           }
+           .width('100%')
+           .margin({ top: 16, bottom: 12 })
         }
         .width('100%')
         .padding({ top: 24, bottom: 24 })
@@ -1099,6 +1698,7 @@ struct Index {
       .borderWidth(1)
       .borderColor(this.selectedCategory === category ? '#111111' : '#E5E5E5')
       .stateEffect(false)
+      .visibility(this.hasCategory(category) ? Visibility.Visible : Visibility.Hidden)
       .onClick(() => {
         this.chooseCategory(category)
       })
@@ -1159,17 +1759,17 @@ struct Index {
               .backgroundColor('#111111')
             Column() {
               Text('林小语').fontSize(21).fontWeight(FontWeight.Bold)
-              Text('已记账 128 天').fontSize(13).fontColor('#999999').margin({ top: 6 })
+              Text('已记账 ' + this.recordedDays() + ' 天').fontSize(13).fontColor('#999999').margin({ top: 6 })
             }
             .alignItems(HorizontalAlign.Start)
           }
           .width('100%')
           Row() {
-            this.profileStat('本月支出', '¥12,680')
+              this.profileStat('本月支出', '¥' + this.currentMonthTotal().toFixed(2))
             Blank().width(1).height(40).backgroundColor('#E5E5E5')
-            this.profileStat('本月笔数', '86')
+              this.profileStat('本月笔数', '' + this.currentMonthTransactions().length)
             Blank().width(1).height(40).backgroundColor('#E5E5E5')
-            this.profileStat('日均', '¥793')
+              this.profileStat('日均', '¥' + this.currentMonthAverage())
           }
           .width('100%')
           .justifyContent(FlexAlign.SpaceBetween)
@@ -1183,7 +1783,7 @@ struct Index {
         Column() {
            this.labelText('SETTINGS')
            this.profileSettingRow($r('app.media.settings_book'), '账本管理', this.currentBookLabel)
-           this.profileSettingRow($r('app.media.settings_category'), '分类管理', '8 个分类')
+            this.profileSettingRow($r('app.media.settings_category'), '分类管理', this.storeData.categories.length + ' 个分类')
            this.profileSettingRow($r('app.media.settings_budget'), '预算设置', this.budgetLabel)
            this.profileSettingRow($r('app.media.settings_reminder'), '记账提醒', this.reminderLabel)
           this.profileSettingRow($r('app.media.settings_export'), '数据导出', 'CSV / Excel')
